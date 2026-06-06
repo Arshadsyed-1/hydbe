@@ -70,3 +70,16 @@ def add_feedback(new_data: dict):
     conn.commit()
 
     return {"message": "Feedback added successfully"}
+
+
+@app.get("/feedback")
+def get_feedback():
+
+    query = "SELECT * FROM feedback"
+
+    cursor.execute(query)
+
+    result = cursor.fetchall()
+
+    return result
+

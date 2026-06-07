@@ -82,4 +82,96 @@ def get_feedback():
     result = cursor.fetchall()
 
     return result
+@app.get("/feedback/today")
+def today_feedback():
+    cursor.execute("""
+    SELECT * FROM feedback
+    WHERE DATE(created_at) = CURDATE()
+    ORDER BY feedback_id DESC
+    """)
 
+    return cursor.fetchall()
+
+
+@app.get("/feedback/analyze")
+def analyze_feedback():
+    cursor.execute("""
+    SELECT feedback_type,
+           COUNT(*) AS total_feedback,
+           ROUND(AVG(rating), 2) AS average_rating
+    FROM feedback
+    WHERE DATE(created_at) = CURDATE()
+    GROUP BY feedback_type
+    """)
+
+    return cursor.fetchall()
+
+
+@app.get("/feedback/ai-summary")
+def ai_summary():
+    cursor.execute("""
+    SELECT * FROM feedback
+    WHERE DATE(created_at) = CURDATE()
+    ORDER BY feedback_id DESC
+    """)
+
+    feedbacks = cursor.fetchall()
+
+    if len(feedbacks) == 0:
+        return {"summary": "No feedback available for today"}
+
+    feedback_text = ""
+
+    for item in feedbacks:
+        feedback_text += f"""
+Name: {item['name']}
+Rating: {item['rating']}
+Type: {item['feedback_type']}
+Message: {item['message']}
+"""
+
+    prompt = f"""
+You are an AI restaurant quality improvement assistant.
+
+Analyze only today's customer feedback.
+
+Your goal:
+Help the restaurant owner understand today's mistakes and improve food quality, taste, and service for tomorrow.
+
+Give the report in this format:
+
+1. Today's Overall Feedback Summary
+2. Main Mistakes Today
+3. Taste Problems
+4. Food Quality Problems
+5. Service Problems
+6. Customer Appreciations
+7. What Should Improve Tomorrow
+8. Action Plan for Tomorrow
+9. Final Owner Advice
+
+Keep the language simple and practical.
+
+Today's Feedback:
+{feedback_text}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    return {"summary": response.choices[0].message.content}
+
+
+@app.delete("/feedback/{feedback_id}")
+def delete_feedback(feedback_id: int):
+    cursor.execute(
+        "DELETE FROM feedback WHERE feedback_id=%s",
+        (feedback_id,)
+    )
+    conn.commit()
+
+    return {"message": "Feedback deleted successfully"}

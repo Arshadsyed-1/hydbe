@@ -3,3 +3,5 @@ uvicorn
 mysql-connector-python
 python-dotenv
 groq
+chromadb
+sentence_transformers

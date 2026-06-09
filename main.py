@@ -1,182 +1,231 @@
-import streamlit as st
-import requests
-import pandas as pd
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from groq import Groq
+from dotenv import load_dotenv
+import mysql.connector
+import os
+import chromadb
+from sentence_transformers import SentenceTransformer
 
-st.set_page_config(
-    page_title="SAFIK HYDERABAD BIRIYANI🍗",
-    layout="wide"
+load_dotenv()
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-st.markdown(
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+conn = mysql.connector.connect(
+    host=os.getenv("DB_HOST"),
+    user=os.getenv("DB_USER"),
+    password=os.getenv("DB_PASSWORD"),
+    database=os.getenv("DB_NAME"),
+    port=int(os.getenv("DB_PORT")),
+    ssl_disabled=False
+)
+
+cursor = conn.cursor(dictionary=True)
+
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+
+collection = chroma_client.get_or_create_collection(
+    name="restaurant_feedback"
+)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS feedback(
+    feedback_id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(100),
+    rating INT,
+    feedback_type VARCHAR(100),
+    message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
+
+
+@app.get("/")
+def home():
+    return {"message": "AI Restaurant Feedback API is running"}
+
+
+@app.post("/feedback")
+def add_feedback(new_data: dict):
+    name = new_data["name"]
+    rating = new_data["rating"]
+    feedback_type = new_data["feedback_type"]
+    message = new_data["message"]
+
+    query = """
+    INSERT INTO feedback(name, rating, feedback_type, message)
+    VALUES(%s,%s,%s,%s)
     """
-    <style>
-    .stApp {
-        background-image: url("https://static.vecteezy.com/system/resources/previews/032/940/126/large_2x/gourmet-biryani-with-saffron-rice-and-chicken-free-photo.jpg");
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-        background-attachment: fixed;
-    }
 
-    h1, h2, h3, h4, h5, h6, p, label, div {
-        color: white !important;
-        font-weight: bold;
-    }
+    values = (name, rating, feedback_type, message)
 
-    [data-testid="stSidebar"] {
-        background-color: rgba(0,0,0,0.7);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+    cursor.execute(query, values)
+    conn.commit()
 
-backend_url = st.secrets["server_url"]
+    feedback_id = cursor.lastrowid
 
-st.title("SAFIK HYDERABAD BIRIYANI🍗")
+    feedback_text = f"""
+Name: {name}
+Rating: {rating}
+Type: {feedback_type}
+Message: {message}
+"""
 
-page = st.sidebar.selectbox(
-    "Select Page",
-    [
-        "Customer Feedback",
-        "Owner Dashboard",
-        "Today's Feedback",
-        "Analytics",
-        "AI Summary",
-        "Ask AI From Feedback"
-    ]
-)
+    embedding = embedding_model.encode(feedback_text).tolist()
 
-
-if page == "Customer Feedback":
-    st.header("📝 Give Your Feedback")
-
-    name = st.text_input("Customer Name")
-    rating = st.slider("Rating", 1, 5, 5)
-    feedback_type = st.selectbox(
-        "Feedback Type",
-        ["Complaint", "Suggestion", "Appreciation"]
+    collection.add(
+        documents=[feedback_text],
+        embeddings=[embedding],
+        ids=[str(feedback_id)]
     )
-    message = st.text_area("Write your feedback")
 
-    if st.button("Submit Feedback"):
-        if name == "" or message == "":
-            st.warning("Please enter name and feedback")
-        else:
-            data = {
-                "name": name,
-                "rating": rating,
-                "feedback_type": feedback_type,
-                "message": message
-            }
-
-            response = requests.post(
-                f"{backend_url}/feedback",
-                json=data
-            )
-
-            if response.status_code == 200:
-                st.success("Feedback Submitted Successfully")
-            else:
-                st.error("Something went wrong")
-                st.write(response.text)
+    return {"message": "Feedback added successfully"}
 
 
-elif page == "Owner Dashboard":
-    st.header("📝 Owner Dashboard")
-
-    if st.button("Load Feedback"):
-        response = requests.get(f"{backend_url}/feedback")
-
-        if response.status_code == 200:
-            data = response.json()
-
-            if len(data) == 0:
-                st.info("No Feedback Found")
-            else:
-                df = pd.DataFrame(data)
-                st.dataframe(df, use_container_width=True)
-        else:
-            st.error("Unable to fetch feedback")
-            st.write(response.text)
+@app.get("/feedback")
+def get_feedback():
+    cursor.execute("SELECT * FROM feedback ORDER BY feedback_id DESC")
+    return cursor.fetchall()
 
 
-elif page == "Today's Feedback":
-    st.header("📅 Today's Customer Feedback")
-
-    response = requests.get(f"{backend_url}/feedback/today")
-
-    if response.status_code == 200:
-        data = response.json()
-
-        if len(data) == 0:
-            st.info("No Feedback Available Today")
-        else:
-            df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
-    else:
-        st.error("Unable to fetch today's feedback")
-        st.write(response.text)
+@app.get("/feedback/today")
+def today_feedback():
+    cursor.execute("""
+    SELECT * FROM feedback
+    WHERE DATE(created_at) = CURDATE()
+    ORDER BY feedback_id DESC
+    """)
+    return cursor.fetchall()
 
 
-elif page == "Analytics":
-    st.header("📈 Feedback Analytics")
-
-    response = requests.get(f"{backend_url}/feedback/analyze")
-
-    if response.status_code == 200:
-        data = response.json()
-
-        if len(data) == 0:
-            st.info("No Analytics Available")
-        else:
-            df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
-    else:
-        st.error("Unable to load analytics")
-        st.write(response.text)
+@app.get("/feedback/analyze")
+def analyze_feedback():
+    cursor.execute("""
+    SELECT feedback_type,
+           COUNT(*) AS total_feedback,
+           ROUND(AVG(rating), 2) AS average_rating
+    FROM feedback
+    WHERE DATE(created_at) = CURDATE()
+    GROUP BY feedback_type
+    """)
+    return cursor.fetchall()
 
 
-elif page == "AI Summary":
-    st.header("🤖 AI Daily Restaurant Report")
+@app.get("/feedback/ai-summary")
+def ai_summary():
+    cursor.execute("""
+    SELECT * FROM feedback
+    WHERE DATE(created_at) = CURDATE()
+    ORDER BY feedback_id DESC
+    """)
 
-    if st.button("Generate AI Summary"):
-        with st.spinner("Analyzing today's feedback..."):
-            response = requests.get(f"{backend_url}/feedback/ai-summary")
+    feedbacks = cursor.fetchall()
 
-            if response.status_code == 200:
-                result = response.json()
+    if len(feedbacks) == 0:
+        return {"summary": "No feedback available for today"}
 
-                st.success("AI Analysis Completed ✅")
-                st.markdown(result["summary"])
-            else:
-                st.error("Unable to generate AI summary")
-                st.write(response.text)
+    feedback_text = ""
+
+    for item in feedbacks:
+        feedback_text += f"""
+Name: {item['name']}
+Rating: {item['rating']}
+Type: {item['feedback_type']}
+Message: {item['message']}
+"""
+
+    prompt = f"""
+You are an AI restaurant quality improvement assistant.
+
+Analyze only today's customer feedback.
+
+Your goal:
+Help the restaurant owner understand today's mistakes and improve food quality, taste, and service for tomorrow.
+
+Give the report in this format:
+
+1. Today's Overall Feedback Summary
+2. Main Mistakes Today
+3. Taste Problems
+4. Food Quality Problems
+5. Service Problems
+6. Customer Appreciations
+7. What Should Improve Tomorrow
+8. Action Plan for Tomorrow
+9. Final Owner Advice
+
+Keep the language simple and practical.
+
+Today's Feedback:
+{feedback_text}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    return {"summary": response.choices[0].message.content}
 
 
-elif page == "Ask AI From Feedback":
-    st.header("🤖 Ask AI From Customer Feedback")
+@app.post("/feedback/rag-question")
+def rag_question(data: dict):
+    question = data["question"]
 
-    question = st.text_input("Ask question about customer feedback")
+    question_embedding = embedding_model.encode(question).tolist()
 
-    if st.button("Ask AI"):
-        if question == "":
-            st.warning("Please enter your question")
-        else:
-            response = requests.post(
-                f"{backend_url}/feedback/rag-question",
-                json={"question": question}
-            )
+    results = collection.query(
+        query_embeddings=[question_embedding],
+        n_results=5
+    )
 
-            if response.status_code == 200:
-                result = response.json()
+    related_feedback = results["documents"][0]
 
-                st.success("AI Answer")
-                st.write(result["answer"])
+    if len(related_feedback) == 0:
+        return {
+            "answer": "No related feedback found",
+            "related_feedback": []
+        }
 
-                with st.expander("Related Feedback Used by AI"):
-                    for item in result["related_feedback"]:
-                        st.write(item)
-            else:
-                st.error("Unable to get AI answer")
-                st.write(response.text)
+    context = "\n\n".join(related_feedback)
+
+    prompt = f"""
+You are an AI restaurant assistant.
+
+Answer the owner's question using only the customer feedback below.
+
+Customer Feedback:
+{context}
+
+Owner Question:
+{question}
+
+Give simple and practical answer.
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    return {
+        "answer": response.choices[0].message.content,
+        "related_feedback": related_feedback
+    }

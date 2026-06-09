@@ -23,7 +23,7 @@ app.add_middleware(
 # GROQ CLIENT
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# AIVEN MYSQL CONNECTION
+# MYSQL CONNECTION
 conn = mysql.connector.connect(
     host=os.getenv("DB_HOST"),
     user=os.getenv("DB_USER"),
@@ -34,6 +34,15 @@ conn = mysql.connector.connect(
 )
 
 cursor = conn.cursor(dictionary=True)
+
+# CHROMA DB + EMBEDDING MODEL
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+
+collection = chroma_client.get_or_create_collection(
+    name="restaurant_feedback"
+)
 
 # CREATE TABLE
 cursor.execute("""
@@ -67,23 +76,36 @@ def add_feedback(new_data: dict):
     """
 
     values = (name, rating, feedback_type, message)
-
     cursor.execute(query, values)
     conn.commit()
+
+    feedback_id = cursor.lastrowid
+
+    feedback_text = f"""
+Name: {name}
+Rating: {rating}
+Type: {feedback_type}
+Message: {message}
+"""
+
+    embedding = embedding_model.encode(feedback_text).tolist()
+
+    collection.add(
+        documents=[feedback_text],
+        embeddings=[embedding],
+        ids=[str(feedback_id)]
+    )
 
     return {"message": "Feedback added successfully"}
 
 
 @app.get("/feedback")
 def get_feedback():
-
-    query = "SELECT * FROM feedback"
-
-    cursor.execute(query)
-
+    cursor.execute("SELECT * FROM feedback ORDER BY feedback_id DESC")
     result = cursor.fetchall()
-
     return result
+
+
 @app.get("/feedback/today")
 def today_feedback():
     cursor.execute("""
@@ -91,7 +113,6 @@ def today_feedback():
     WHERE DATE(created_at) = CURDATE()
     ORDER BY feedback_id DESC
     """)
-
     return cursor.fetchall()
 
 
@@ -105,7 +126,6 @@ def analyze_feedback():
     WHERE DATE(created_at) = CURDATE()
     GROUP BY feedback_type
     """)
-
     return cursor.fetchall()
 
 
@@ -168,15 +188,6 @@ Today's Feedback:
     return {"summary": response.choices[0].message.content}
 
 
-@app.delete("/feedback/{feedback_id}")
-def delete_feedback(feedback_id: int):
-    cursor.execute(
-        "DELETE FROM feedback WHERE feedback_id=%s",
-        (feedback_id,)
-    )
-    conn.commit()
-
-    return {"message": "Feedback deleted successfully"}
 @app.post("/feedback/rag-question")
 def rag_question(data: dict):
     question = data["question"]
@@ -189,6 +200,12 @@ def rag_question(data: dict):
     )
 
     related_feedback = results["documents"][0]
+
+    if len(related_feedback) == 0:
+        return {
+            "answer": "No related feedback found",
+            "related_feedback": []
+        }
 
     context = "\n\n".join(related_feedback)
 
@@ -217,3 +234,19 @@ Give simple and practical answer.
         "answer": response.choices[0].message.content,
         "related_feedback": related_feedback
     }
+
+
+@app.delete("/feedback/{feedback_id}")
+def delete_feedback(feedback_id: int):
+    cursor.execute(
+        "DELETE FROM feedback WHERE feedback_id=%s",
+        (feedback_id,)
+    )
+    conn.commit()
+
+    try:
+        collection.delete(ids=[str(feedback_id)])
+    except:
+        pass
+
+    return {"message": "Feedback deleted successfully"}

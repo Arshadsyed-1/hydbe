@@ -4,6 +4,8 @@ from groq import Groq
 from dotenv import load_dotenv
 import mysql.connector
 import os
+import chromadb
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -175,3 +177,43 @@ def delete_feedback(feedback_id: int):
     conn.commit()
 
     return {"message": "Feedback deleted successfully"}
+@app.post("/feedback/rag-question")
+def rag_question(data: dict):
+    question = data["question"]
+
+    question_embedding = embedding_model.encode(question).tolist()
+
+    results = collection.query(
+        query_embeddings=[question_embedding],
+        n_results=5
+    )
+
+    related_feedback = results["documents"][0]
+
+    context = "\n\n".join(related_feedback)
+
+    prompt = f"""
+You are an AI restaurant assistant.
+
+Answer the owner's question using only the customer feedback below.
+
+Customer Feedback:
+{context}
+
+Owner Question:
+{question}
+
+Give simple and practical answer.
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    return {
+        "answer": response.choices[0].message.content,
+        "related_feedback": related_feedback
+    }
